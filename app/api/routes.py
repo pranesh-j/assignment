@@ -4,9 +4,17 @@ import uuid
 import os
 import pandas as pd
 import tempfile
+import requests
+import re
+import logging
+import threading
+import shutil
+from datetime import datetime
 from app.models.database import db, Request, Product
-from app.workers.tasks import process_images
+from app.workers.tasks import process_images, send_webhook_notification
 from app.utils.utils_generator import generate_output_csv
+
+logger = logging.getLogger(__name__)
 
 api_bp = Blueprint('api', __name__)
 
@@ -49,6 +57,7 @@ def upload_csv():
                 db.session.add(product)
             
             db.session.commit()
+            logger.info(f"Request {request_id} created successfully")
             
             process_images.delay(request_id)
             
@@ -56,6 +65,7 @@ def upload_csv():
             
         except Exception as e:
             db.session.rollback()
+            logger.exception(f"Error processing CSV upload: {str(e)}")
             return jsonify({'error': f'Invalid CSV format: {str(e)}'}), 400
         finally:
             if os.path.exists(temp_path):
@@ -79,6 +89,8 @@ def check_status(request_id):
     
     progress = (completed_products / total_products * 100) if total_products > 0 else 0
     
+    logger.info(f"Status check for request {request_id}: progress {progress:.1f}%")
+    
     return jsonify({
         'request_id': request_id,
         'status': req.status,
@@ -90,8 +102,20 @@ def check_status(request_id):
             'in_progress': in_progress
         },
         'created_at': req.created_at,
-        'updated_at': req.updated_at
+        'updated_at': req.updated_at,
+        'webhook_url': req.webhook_url
     }), 200
+
+def validate_webhook_url(url):
+    url_pattern = re.compile(
+        r'^https?://'  
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'  
+        r'localhost|'  
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  
+        r'(?::\d+)?'  
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    
+    return bool(url_pattern.match(url))
 
 @api_bp.route('/webhook', methods=['POST'])
 def register_webhook():
@@ -99,6 +123,9 @@ def register_webhook():
     
     if not data or 'request_id' not in data or 'webhook_url' not in data:
         return jsonify({'error': 'Missing required fields: request_id and webhook_url'}), 400
+    
+    if not validate_webhook_url(data['webhook_url']):
+        return jsonify({'error': 'Invalid webhook URL format'}), 400
     
     req = Request.query.filter_by(request_id=data['request_id']).first()
     
@@ -108,26 +135,128 @@ def register_webhook():
     req.webhook_url = data['webhook_url']
     db.session.commit()
     
-    return jsonify({'message': 'Webhook registered successfully'}), 200
+    logger.info(f"Webhook registered for request {data['request_id']}: {req.webhook_url}")
+    
+    try:
+        test_response = requests.post(
+            data['webhook_url'],
+            json={'test': 'Webhook registration test', 'request_id': data['request_id']},
+            timeout=5
+        )
+        logger.info(f"Webhook test response: {test_response.status_code}")
+    except Exception as e:
+        logger.error(f"Webhook test failed: {str(e)}")
+    
+    if req.status in ['COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED']:
+        send_webhook_notification.delay(data['request_id'])
+        trigger_message = "Processing already complete. Webhook notification queued."
+    else:
+        trigger_message = "Webhook will be triggered when processing completes."
+    
+    return jsonify({
+        'message': 'Webhook registered successfully',
+        'trigger_status': trigger_message,
+        'request_id': data['request_id'],
+        'webhook_url': req.webhook_url
+    }), 200
 
-@api_bp.route('/download/<request_id>', methods=['GET'])
-def download_csv(request_id):
+@api_bp.route('/trigger-webhook/<request_id>', methods=['POST'])
+def trigger_webhook(request_id):
     req = Request.query.filter_by(request_id=request_id).first()
+    
     if not req:
         return jsonify({'error': 'Request not found'}), 404
     
-    if req.status not in ['COMPLETED', 'PARTIALLY_COMPLETED']:
-        return jsonify({'error': 'Request processing not complete'}), 400
+    if not req.webhook_url:
+        return jsonify({'error': 'No webhook URL registered for this request'}), 400
     
-    temp_file = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
-    temp_file.close()
+    logger.info(f"Manually triggering webhook for request {request_id}")
+    send_webhook_notification.delay(request_id)
     
-    if generate_output_csv(request_id, temp_file.name):
-        return send_file(
-            temp_file.name,
+    return jsonify({
+        'message': 'Webhook notification queued',
+        'request_id': request_id,
+        'webhook_url': req.webhook_url
+    }), 200
+
+@api_bp.route('/test-webhook', methods=['POST'])
+def test_webhook():
+    data = request.json
+    
+    if not data or 'webhook_url' not in data:
+        return jsonify({'error': 'Missing required field: webhook_url'}), 400
+    
+    try:
+        payload = {
+            'test': True,
+            'message': 'This is a test webhook from the image processor',
+            'timestamp': str(datetime.utcnow())
+        }
+        
+        logger.info(f"Sending test webhook to {data['webhook_url']}")
+        response = requests.post(
+            data['webhook_url'],
+            json=payload,
+            timeout=10
+        )
+        
+        return jsonify({
+            'success': True,
+            'status_code': response.status_code,
+            'response': response.text
+        }), 200
+    except Exception as e:
+        logger.exception(f"Error sending test webhook: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+def cleanup_temp_dir(temp_dir):
+    import time
+    time.sleep(60)
+    try:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            logger.info(f"Cleaned up temporary directory: {temp_dir}")
+    except Exception as e:
+        logger.error(f"Error cleaning up temporary directory: {str(e)}")
+
+@api_bp.route('/download/<request_id>', methods=['GET'])
+def download_csv(request_id):
+    try:
+        req = Request.query.filter_by(request_id=request_id).first()
+        if not req:
+            return jsonify({'error': 'Request not found'}), 404
+        
+        if req.status not in ['COMPLETED', 'PARTIALLY_COMPLETED']:
+            return jsonify({'error': 'Request processing not complete'}), 400
+        
+        temp_dir = tempfile.mkdtemp()
+        output_path = os.path.join(temp_dir, f'processed_data_{request_id}.csv')
+        
+        logger.info(f"Generating CSV for request {request_id}")
+        success = generate_output_csv(request_id, output_path)
+        
+        if not success:
+            return jsonify({'error': 'Failed to generate CSV'}), 500
+        
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.error(f"Generated CSV file is empty or missing: {output_path}")
+            return jsonify({'error': 'Generated CSV file is empty or missing'}), 500
+        
+        logger.info(f"Sending CSV file for request {request_id}")
+        response = send_file(
+            output_path,
             mimetype='text/csv',
             as_attachment=True,
             download_name=f'processed_data_{request_id}.csv'
         )
+        
+        threading.Thread(target=cleanup_temp_dir, args=(temp_dir,)).start()
+        
+        return response
     
-    return jsonify({'error': 'Failed to generate CSV'}), 500
+    except Exception as e:
+        logger.exception(f"Error in download endpoint: {str(e)}")
+        return jsonify({'error': f'Download failed: {str(e)}'}), 500
