@@ -13,12 +13,6 @@ This system processes image data from CSV files by:
 6. Supporting webhook notifications for completion
 
 
-## Documentation
-
-- [Low-Level Design Document](docs/lld_document.md)
-- [API Documentation](docs/api_documentation.md)
-- [Asynchronous Workers Documentation](docs/async_workers.md)
-
 ## API Endpoints
 
 | Endpoint | Method | Description |
