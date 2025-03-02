@@ -10,7 +10,7 @@ The Image Processing System processes image data from CSV files with these compo
 
 ## System Architecture
 
-![System Architecture Diagram](docs/images/lld.png)
+![System Architecture Diagram](images/lld.png)
 
 ## 3. Component Specifications
 
