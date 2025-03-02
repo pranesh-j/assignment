@@ -12,13 +12,10 @@ This system processes image data from CSV files by:
 5. Providing APIs for upload, status checking, and results download
 6. Supporting webhook notifications for completion
 
-## System Architecture
-
-![System Architecture Diagram](docs/images/lld.png)
 
 ## Documentation
 
-- [Low Level Design Document](docs/lld_documentation.md)
+- [Low-Level Design Document](docs/lld_document.md)
 - [API Documentation](docs/api_documentation.md)
 - [Asynchronous Workers Documentation](docs/async_workers.md)
 
