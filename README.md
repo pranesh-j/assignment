@@ -2,6 +2,13 @@
 
 A scalable system for processing image data from CSV files using Python, Flask, PostgreSQL, and Celery.
 
+## Documentation
+
+- [Low Level Design Document](docs/lld_documentation.md)
+- [API Documentation](docs/api_documentation.md)
+- [Asynchronous Workers Documentation](docs/async_workers.md)
+
+
 ## Project Overview
 
 This system processes image data from CSV files by:
@@ -16,11 +23,6 @@ This system processes image data from CSV files by:
 
 ![System Architecture Diagram](docs/images/lld.png)
 
-## Documentation
-
-- [Low Level Design Document](docs/lld_documentation.md)
-- [API Documentation](docs/api_documentation.md)
-- [Asynchronous Workers Documentation](docs/async_workers.md)
 
 ## API Endpoints
 
